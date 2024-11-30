@@ -5,9 +5,20 @@ from abc import ABC, abstractmethod
 from array import array
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Mapping, Optional
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Dict,
+    List,
+    Mapping,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+    cast,
+)
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple, Union, cast
 
 import msgspec
 import torch
@@ -399,9 +410,20 @@ class Sequence:
             raise ValueError("Cannot extract encoder input prompt from "
                              f"invalid input {inputs}; did you forget the "
                              "encoder input prompt fields?")
-
+        # 如果self.prompt_token_ids尾端有None，将这些None去掉
+        new_prompt_token_ids = []
+        for token_id in self.prompt_token_ids:
+            if token_id is not None:
+                new_prompt_token_ids.append(token_id)
+        # self.data = SequenceData(
+        #     array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
         self.data = SequenceData(
-            array(VLLM_TOKEN_ID_ARRAY_TYPE, self.prompt_token_ids))
+            array(VLLM_TOKEN_ID_ARRAY_TYPE, new_prompt_token_ids))
+        # print("prompt_token_ids", self.prompt_token_ids)
+        # if self.prompt_token_ids is None:
+        #     raise ValueError("prompt_token_ids cannot be None")
+        # if not isinstance(self.prompt_token_ids, list) or not all(isinstance(x, int) for x in self.prompt_token_ids):
+        #     raise ValueError("prompt_token_ids must be a list of integers")
         self.output_logprobs: SampleLogprobs = []
         self.output_text = ""
 

@@ -157,11 +157,19 @@ class SamplingParams(
     include_stop_str_in_output: bool = False
     truncate_prompt_tokens: Optional[Annotated[int, msgspec.Meta(ge=1)]] = None
     output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE
+    is_generate_cache: bool = False
+    extra_seq_groups = [] # of type List[SequenceGroup]; avoid circular import
+    expire_seq_groups = [] # of type List[SequenceGroup]; avoid circular import
+    recomp_block_num: Optional[int] = None
+    recomp_block_percent: Optional[int] = None
+    recomp_len: Optional[int] = None
+    computed_block_nums: Optional[List[int]] = None
 
     # The below fields are not supposed to be used as an input.
     # They are set in post_init.
     output_text_buffer_length: int = 0
     _all_stop_token_ids: Set[int] = msgspec.field(default_factory=set)
+
 
     @staticmethod
     def from_optional(
@@ -193,6 +201,13 @@ class SamplingParams(
         truncate_prompt_tokens: Optional[Annotated[int,
                                                    msgspec.Meta(ge=1)]] = None,
         output_kind: RequestOutputKind = RequestOutputKind.CUMULATIVE,
+        is_generate_cache: bool = False,
+        extra_seq_groups = [], # of type List[SequenceGroup]; avoid circular import
+        expire_seq_groups = [], # of type List[SequenceGroup]; avoid circular import
+        recomp_block_num: Optional[int] = None,
+        recomp_block_percent: Optional[int] = None,
+        recomp_len: Optional[int] = None,
+        computed_block_nums: Optional[List[int]] = None
     ) -> "SamplingParams":
         return SamplingParams(
             n=1 if n is None else n,
@@ -225,6 +240,13 @@ class SamplingParams(
             logits_processors=logits_processors,
             truncate_prompt_tokens=truncate_prompt_tokens,
             output_kind=output_kind,
+            is_generate_cache=is_generate_cache,
+            extra_seq_groups=extra_seq_groups,
+            expire_seq_groups=expire_seq_groups,
+            recomp_block_num=recomp_block_num,
+            recomp_block_percent=recomp_block_percent,
+            recomp_len=recomp_len,
+            computed_block_nums=computed_block_nums
         )
 
     def __post_init__(self) -> None:
@@ -332,6 +354,14 @@ class SamplingParams(
         if self.best_of != self.n and self.output_kind == (
                 RequestOutputKind.DELTA):
             raise ValueError("best_of must equal n to use output_kind=DELTA")
+        if self.is_generate_cache and len(self.extra_seq_groups) > 0:
+            raise ValueError(
+                "is_generate_cache and extra_seq_group cannot be used together."
+            )
+        if self.recomp_block_num is not None and self.recomp_block_percent is not None:
+            raise ValueError(
+                "recomp_block_num and recomp_block_percent cannot be used together."
+            )
 
     def _verify_beam_search(self) -> None:
         if self.best_of == 1:
@@ -417,6 +447,18 @@ class SamplingParams(
             for lp in self.logits_processors
         }
         return copy.deepcopy(self, memo=logit_processor_refs)
+    
+    def get_recomp_len(self, block_len: int) -> int:
+        if self.recomp_len is None:
+            self.total_len = block_len
+            if self.recomp_block_num is not None:
+                recomp_len = self.recomp_block_num
+            elif self.recomp_block_percent is not None:
+                recomp_len = int(block_len * self.recomp_block_percent / 100)
+            else:
+                recomp_len = 0
+            self.recomp_len = min(recomp_len, block_len)
+        return self.recomp_len
 
     def __repr__(self) -> str:
         return (
@@ -444,4 +486,10 @@ class SamplingParams(
             f"skip_special_tokens={self.skip_special_tokens}, "
             "spaces_between_special_tokens="
             f"{self.spaces_between_special_tokens}, "
-            f"truncate_prompt_tokens={self.truncate_prompt_tokens})")
+            f"truncate_prompt_tokens={self.truncate_prompt_tokens}, "
+            f"output_kind={self.output_kind}, "
+            f"is_generate_cache={self.is_generate_cache}, "
+            f"extra_seq_groups={self.extra_seq_groups}, "
+            f"expire_seq_groups={self.expire_seq_groups}, "
+            f"recomp_block_num={self.recomp_block_num}, "
+            f"recomp_block_percent={self.recomp_block_percent}, ")

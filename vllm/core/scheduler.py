@@ -4,17 +4,31 @@ import random
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import (Callable, Deque, Dict, Iterable, List, Optional, Set,
-                    Tuple, Union)
+from typing import (
+    Callable,
+    Deque,
+    Dict,
+    Iterable,
+    List,
+    Optional,
+    Set,
+    Tuple,
+    Union,
+)
 
 from vllm.config import CacheConfig, LoRAConfig, SchedulerConfig
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.prompt_adapter.request import PromptAdapterRequest
-from vllm.sequence import (Sequence, SequenceData, SequenceGroup,
-                           SequenceGroupMetadata, SequenceGroupMetadataDelta,
-                           SequenceStatus)
+from vllm.sequence import (
+    Sequence,
+    SequenceData,
+    SequenceGroup,
+    SequenceGroupMetadata,
+    SequenceGroupMetadataDelta,
+    SequenceStatus,
+)
 from vllm.utils import Device, PyObjectCache
 
 logger = init_logger(__name__)
@@ -1113,7 +1127,7 @@ class Scheduler:
         now = time.time()
 
         if not self.cache_config.enable_prefix_caching:
-            common_computed_block_nums = []
+            computed_block_nums = []
 
         allow_async_output_proc: bool = self.use_async_output_proc
 
@@ -1154,8 +1168,20 @@ class Scheduler:
                 block_tables[seq_id] = self.block_manager.get_block_table(seq)
                 self.block_manager.access_all_blocks_in_seq(seq, now)
 
-            if self.cache_config.enable_prefix_caching:
-                common_computed_block_nums = (
+            if len(seq_group.sampling_params.extra_seq_groups) > 0:
+                # kvlink(wenrui): computed_block_nums helps avoiding recompute of system-level prompt
+                if seq_group.sampling_params.computed_block_nums is None:
+                    computed_block_nums = []
+                    for extra_seq_group in seq_group.sampling_params.extra_seq_groups:
+                        computed_block_nums += self.block_manager.get_block_table(extra_seq_group.get_seqs()[0])
+                    recomp_len = seq_group.sampling_params.get_recomp_len(len(computed_block_nums))
+                    for _ in range(recomp_len):
+                        computed_block_nums.pop()
+                    seq_group.sampling_params.computed_block_nums = computed_block_nums
+                else:
+                    computed_block_nums = seq_group.sampling_params.computed_block_nums
+            elif self.cache_config.enable_prefix_caching:
+                computed_block_nums = (
                     self.block_manager.get_common_computed_block_ids(
                         seq_group.get_seqs(status=SequenceStatus.RUNNING)))
 
@@ -1192,7 +1218,7 @@ class Scheduler:
                     pooling_params=seq_group.pooling_params,
                     token_chunk_size=token_chunk_size,
                     lora_request=seq_group.lora_request,
-                    computed_block_nums=common_computed_block_nums,
+                    computed_block_nums=computed_block_nums,
                     encoder_seq_data=encoder_seq_data,
                     cross_block_table=cross_block_table,
                     state=seq_group.state,
@@ -1217,7 +1243,7 @@ class Scheduler:
                     is_prompt,
                     do_sample=do_sample,
                     token_chunk_size=token_chunk_size,
-                    computed_block_nums=common_computed_block_nums,
+                    computed_block_nums=computed_block_nums,
                 )
             seq_group_metadata_list.append(seq_group_metadata)
 
@@ -1263,6 +1289,8 @@ class Scheduler:
 
     def _free_finished_seqs(self, seq_group: SequenceGroup) -> None:
         """Free finished seqs in a sequence group."""
+        if seq_group.sampling_params.is_generate_cache:
+            return
         for seq in seq_group.get_seqs():
             if seq.is_finished():
                 self.free_seq(seq)

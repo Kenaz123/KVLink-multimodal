@@ -2,13 +2,17 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from vllm.config import SchedulerConfig
 from vllm.core.scheduler import Scheduler
-from vllm.engine.output_processor.interfaces import (
-    SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.logger import init_logger
 from vllm.sampling_params import SamplingParams
-from vllm.sequence import (Sequence, SequenceGroup, SequenceGroupOutput,
-                           SequenceOutput, SequenceStatus)
+from vllm.sequence import (
+    Sequence,
+    SequenceGroup,
+    SequenceGroupOutput,
+    SequenceOutput,
+    SequenceStatus,
+)
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.utils import Counter
 
@@ -113,28 +117,7 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
                                         outputs: SequenceGroupOutput,
                                         is_async: bool) -> None:
         sampling_params = seq_group.sampling_params
-        if sampling_params.best_of == 1 and not sampling_params.use_beam_search:
-            # only have one output sample
-            sample = outputs.samples[0]
-            # only have one sequence
-            seq = seq_group.seqs[0]
-            if not is_async:
-                seq.append_token_id(sample.output_token, sample.logprobs)
-            if sampling_params.detokenize and self.detokenizer:
-                new_char_count = self.detokenizer.decode_sequence_inplace(
-                    seq, sampling_params)
-            else:
-                new_char_count = 0
-            self.stop_checker.maybe_stop_sequence(
-                seq,
-                new_char_count,
-                sampling_params,
-                lora_req=seq_group.lora_request,
-            )
-            if seq.is_finished():
-                for scheduler in self.scheduler:
-                    scheduler.free_seq(seq)
-            return
+        
 
         # TODO: Add support for async for beam search
         assert not is_async
@@ -212,10 +195,20 @@ class SingleStepOutputProcessor(SequenceGroupOutputProcessor):
             # manager. Keep them in the sequence group as candidate output.
             # NOTE: we need to fork the new sequences before freeing the
             # old sequences.
-            for seq, parent in child_seqs:
-                if seq is parent and seq.is_finished():
+            # kvlink(wenrui): If we are generating cache, we should not free
+            # the seqgroup's memory.
+            all_freed = True
+            if not seq_group.sampling_params.is_generate_cache:
+                for seq, parent in child_seqs:
+                    if seq is parent and seq.is_finished():
+                        for scheduler in self.scheduler:
+                            scheduler.free_seq(seq)
+                    else:
+                        all_freed = False
+            if all_freed:
+                for expire_seq_group in seq_group.sampling_params.expire_seq_groups:
                     for scheduler in self.scheduler:
-                        scheduler.free_seq(seq)
+                        scheduler.free_seq(expire_seq_group.get_seqs()[0])
             return
 
         # Beam search case

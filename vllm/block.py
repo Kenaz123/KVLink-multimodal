@@ -86,3 +86,7 @@ class BlockTable:
 
     def ids(self) -> List[int]:
         return self._block_ids
+
+    def extend(self, block_table: 'BlockTable'):
+        self._blocks.extend(block_table._blocks)
+        self._block_ids.extend(block_table._block_ids)

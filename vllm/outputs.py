@@ -87,6 +87,7 @@ class RequestOutput:
                         None if decoder-only
         encoder_prompt_token_ids: The token IDs of the encoder prompt;
                                   None if decoder-only
+        seq_group: The sequence group that was used to generate the output.
     """
 
     def __init__(
@@ -101,6 +102,7 @@ class RequestOutput:
         lora_request: Optional[LoRARequest] = None,
         encoder_prompt: Optional[str] = None,
         encoder_prompt_token_ids: Optional[List[int]] = None,
+        seq_group: Optional[SequenceGroup] = None,
     ) -> None:
         self.request_id = request_id
         self.prompt = prompt
@@ -112,6 +114,7 @@ class RequestOutput:
         self.lora_request = lora_request
         self.encoder_prompt = encoder_prompt
         self.encoder_prompt_token_ids = encoder_prompt_token_ids
+        self.seq_group = seq_group
 
     @classmethod
     def from_seq_group(cls,
@@ -197,7 +200,11 @@ class RequestOutput:
                    seq_group.metrics,
                    lora_request=seq_group.lora_request,
                    encoder_prompt=encoder_prompt,
-                   encoder_prompt_token_ids=encoder_prompt_token_ids)
+                   encoder_prompt_token_ids=encoder_prompt_token_ids,
+                   seq_group=(
+                        seq_group if seq_group.sampling_params.is_generate_cache
+                        else None)
+                   )
 
     def __repr__(self) -> str:
         return (f"RequestOutput(request_id={self.request_id}, "

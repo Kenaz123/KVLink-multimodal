@@ -3,54 +3,100 @@ import time
 from collections import deque
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import (TYPE_CHECKING, Any, Callable, ClassVar, Deque, Dict,
-                    Iterable, List, Mapping, NamedTuple, Optional)
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    ClassVar,
+    Deque,
+    Dict,
+    Iterable,
+    List,
+    Mapping,
+    NamedTuple,
+    Optional,
+    Set,
+    Type,
+    Union,
+)
 from typing import Sequence as GenericSequence
-from typing import Set, Type, Union
 
 import torch
 from typing_extensions import TypeVar
 
 import vllm.envs as envs
-from vllm.config import (CacheConfig, DecodingConfig, DeviceConfig,
-                         EngineConfig, LoadConfig, LoRAConfig, ModelConfig,
-                         ObservabilityConfig, ParallelConfig,
-                         PromptAdapterConfig, SchedulerConfig,
-                         SpeculativeConfig)
-from vllm.core.scheduler import (ScheduledSequenceGroup, Scheduler,
-                                 SchedulerOutputs)
+from vllm.config import (
+    CacheConfig,
+    DecodingConfig,
+    DeviceConfig,
+    EngineConfig,
+    LoadConfig,
+    LoRAConfig,
+    ModelConfig,
+    ObservabilityConfig,
+    ParallelConfig,
+    PromptAdapterConfig,
+    SchedulerConfig,
+    SpeculativeConfig,
+)
+from vllm.core.scheduler import (
+    ScheduledSequenceGroup,
+    Scheduler,
+    SchedulerOutputs,
+)
 from vllm.engine.arg_utils import EngineArgs
 from vllm.engine.metrics_types import StatLoggerBase, Stats
-from vllm.engine.output_processor.interfaces import (
-    SequenceGroupOutputProcessor)
+from vllm.engine.output_processor.interfaces import SequenceGroupOutputProcessor
 from vllm.engine.output_processor.stop_checker import StopChecker
 from vllm.engine.output_processor.util import create_output_by_sequence_group
 from vllm.executor.executor_base import ExecutorBase
 from vllm.executor.gpu_executor import GPUExecutor
 from vllm.executor.ray_utils import initialize_ray_cluster
-from vllm.inputs import (INPUT_REGISTRY, EncoderDecoderLLMInputs,
-                         InputRegistry, LLMInputs, PromptInputs)
+from vllm.inputs import (
+    INPUT_REGISTRY,
+    EncoderDecoderLLMInputs,
+    InputRegistry,
+    LLMInputs,
+    PromptInputs,
+)
 from vllm.inputs.preprocess import InputPreprocessor
 from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.model_executor.layers.sampler import SamplerOutput
-from vllm.outputs import (EmbeddingRequestOutput, RequestOutput,
-                          RequestOutputFactory)
+from vllm.outputs import (
+    EmbeddingRequestOutput,
+    RequestOutput,
+    RequestOutputFactory,
+)
 from vllm.pooling_params import PoolingParams
 from vllm.prompt_adapter.request import PromptAdapterRequest
 from vllm.sampling_params import RequestOutputKind, SamplingParams
-from vllm.sequence import (EmbeddingSequenceGroupOutput, ExecuteModelRequest,
-                           Sequence, SequenceGroup, SequenceGroupMetadata,
-                           SequenceStatus)
-from vllm.tracing import (SpanAttributes, SpanKind, extract_trace_context,
-                          init_tracer)
+from vllm.sequence import (
+    EmbeddingSequenceGroupOutput,
+    ExecuteModelRequest,
+    Sequence,
+    SequenceGroup,
+    SequenceGroupMetadata,
+    SequenceStatus,
+)
+from vllm.tracing import (
+    SpanAttributes,
+    SpanKind,
+    extract_trace_context,
+    init_tracer,
+)
 from vllm.transformers_utils.config import try_get_generation_config
 from vllm.transformers_utils.detokenizer import Detokenizer
 from vllm.transformers_utils.tokenizer import AnyTokenizer
 from vllm.transformers_utils.tokenizer_group import (
-    BaseTokenizerGroup, init_tokenizer_from_configs)
-from vllm.usage.usage_lib import (UsageContext, is_usage_stats_enabled,
-                                  usage_message)
+    BaseTokenizerGroup,
+    init_tokenizer_from_configs,
+)
+from vllm.usage.usage_lib import (
+    UsageContext,
+    is_usage_stats_enabled,
+    usage_message,
+)
 from vllm.utils import Counter, Device
 from vllm.version import __version__ as VLLM_VERSION
 
@@ -333,7 +379,8 @@ class LLMEngine:
         # If usage stat is enabled, collect relevant info.
         if is_usage_stats_enabled():
             from vllm.model_executor.model_loader import (
-                get_architecture_class_name)
+                get_architecture_class_name,
+            )
             usage_message.report_usage(
                 get_architecture_class_name(model_config),
                 usage_context,
@@ -413,8 +460,10 @@ class LLMEngine:
                 # We need to set PROMETHEUS_MULTIPROC_DIR environment variable
                 # before prometheus_client is imported.
                 # See https://prometheus.github.io/client_python/multiprocess/
-                from vllm.engine.metrics import (LoggingStatLogger,
-                                                 PrometheusStatLogger)
+                from vllm.engine.metrics import (
+                    LoggingStatLogger,
+                    PrometheusStatLogger,
+                )
 
                 self.stat_loggers = {
                     "logging":
@@ -525,7 +574,8 @@ class LLMEngine:
             executor_class = RayGPUExecutor
         elif distributed_executor_backend == "mp":
             from vllm.executor.multiproc_gpu_executor import (
-                MultiprocessingGPUExecutor)
+                MultiprocessingGPUExecutor,
+            )
             assert not envs.VLLM_USE_RAY_SPMD_WORKER, (
                 "multiprocessing distributed executor backend does not "
                 "support VLLM_USE_RAY_SPMD_WORKER=1")
@@ -623,6 +673,23 @@ class LLMEngine:
         block_size = self.cache_config.block_size
         seq_id = next(self.seq_counter)
         eos_token_id = self.input_preprocessor.get_eos_token_id(lora_request)
+
+        prompt_token_ids = processed_inputs["prompt_token_ids"]
+        # kvlink hack
+        assert isinstance(params, SamplingParams)
+        if params.is_generate_cache:
+            # for generating cache, we align prompt_token_ids up to block_size, filled with pad_token_id
+            num_filled = (block_size - len(prompt_token_ids) % block_size) % block_size
+            prompt_token_ids = prompt_token_ids + [eos_token_id] * num_filled 
+            assert len(prompt_token_ids) % block_size == 0, f"prompt_token_ids length {len(prompt_token_ids)} is not aligned to block_size {block_size}"
+        elif len(params.extra_seq_groups) > 0:
+            # we connect prompt_token_ids altogether
+            new_prompt_token_ids = []
+            for extra_seq_group in params.extra_seq_groups:
+                new_prompt_token_ids += extra_seq_group.get_seqs()[0].get_prompt_token_ids()
+            prompt_token_ids = new_prompt_token_ids + prompt_token_ids
+        
+        processed_inputs["prompt_token_ids"] = prompt_token_ids
 
         seq = Sequence(seq_id, processed_inputs, block_size, eos_token_id,
                        lora_request, prompt_adapter_request)
@@ -770,7 +837,7 @@ class LLMEngine:
 
         # Defensive copy of SamplingParams, which are used by the sampler,
         # this doesn't deep-copy LogitsProcessor objects
-        sampling_params = sampling_params.clone()
+        # sampling_params = sampling_params.clone()
 
         sampling_params.update_from_generation_config(
             self.generation_config_fields, seq.eos_token_id)

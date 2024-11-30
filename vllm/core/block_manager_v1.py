@@ -3,9 +3,8 @@ import math
 from abc import ABC, abstractmethod
 from itertools import count, takewhile
 from os.path import commonprefix
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set, Tuple
 from typing import Sequence as GenericSequence
-from typing import Set, Tuple
 
 from vllm.block import BlockTable, PhysicalTokenBlock
 from vllm.core.block.common import CacheMetricData
@@ -13,6 +12,7 @@ from vllm.core.block.utils import check_no_caching_or_swa_for_blockmgr_encdec
 from vllm.core.evictor_v1 import EvictionPolicy, Evictor, make_evictor
 from vllm.core.interfaces import AllocStatus, BlockSpaceManager
 from vllm.logger import init_logger
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import Sequence, SequenceGroup, SequenceStatus
 from vllm.utils import Device
 
@@ -300,6 +300,20 @@ class BlockSpaceManagerV1(BlockSpaceManager):
                                       self.block_sliding_window)
         num_free_gpu_blocks = self.gpu_allocator.get_num_free_blocks()
 
+        # lazy computation for improving performance
+        if seq_group.sampling_params.recomp_len is None:
+            total_len = 0
+            for extra_seq_group in seq_group.sampling_params.extra_seq_groups:
+                seq_id = extra_seq_group.get_seqs()[0].seq_id
+                total_len += len(self.block_tables[seq_id])
+            recomp_len = seq_group.sampling_params.get_recomp_len(total_len)
+        else:
+            total_len = seq_group.sampling_params.total_len
+            recomp_len = seq_group.sampling_params.recomp_len
+        
+        # kvlink(wenrui): rule out prefix that needs not to be recomputed
+        num_required_blocks -= total_len - recomp_len
+
         # Use watermark to avoid frequent cache eviction.
         if (self.num_total_gpu_blocks - num_required_blocks <
                 self.watermark_blocks):
@@ -312,12 +326,31 @@ class BlockSpaceManagerV1(BlockSpaceManager):
     def _allocate_sequence(self, \
                            seq: Optional[Sequence], \
                            ref_count: int, \
+                           sampling_params: SamplingParams, \
                            is_encoder_decoder: bool = True) -> BlockTable:
         # Allocate new physical token blocks that will store the prompt tokens.
         num_prompt_blocks = self._get_seq_num_required_blocks(seq)
 
         block_table: BlockTable = BlockTable()
         assert seq is not None
+
+        if len(sampling_params.extra_seq_groups) > 0:
+            # kvlink(wenrui): block_table collects all the context beforehand
+            for extra_seq_group in sampling_params.extra_seq_groups:
+                # fork the context prompt
+                seq_id = extra_seq_group.get_seqs()[0].seq_id
+                for block in self.block_tables[seq_id]:
+                    block.ref_count += ref_count
+                block_table.extend(self.block_tables[seq_id])
+            
+            total_len = len(block_table)
+            recomp_len = sampling_params.get_recomp_len(total_len)
+            for _ in range(recomp_len):
+                block_table[-1].ref_count -= ref_count
+                block_table.pop()
+                    
+            num_prompt_blocks -= total_len - recomp_len
+
         for logical_idx in range(num_prompt_blocks):
             if (self.block_sliding_window is not None
                     and logical_idx >= self.block_sliding_window):
@@ -349,6 +382,7 @@ class BlockSpaceManagerV1(BlockSpaceManager):
         block_table: BlockTable = \
             self._allocate_sequence(seq,
                                     seq_group.num_seqs(),
+                                    seq_group.sampling_params,
                                     is_encoder_decoder)
 
         # Assign the self-attention block tables for each sequence.
